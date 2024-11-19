@@ -5,7 +5,13 @@ from vnpy.trader.engine import MainEngine
 from vnpy_ctabacktester.ui import BacktesterManager
 from vnpy_ctabacktester import CtaBacktesterApp
 from vnpy.trader.ui import QtWidgets
+from vnpy.trader.setting import SETTINGS
 
+SETTINGS['database.name'] = 'postgresql'
+SETTINGS['database.database'] = 'testdb'
+SETTINGS['database.host'] = 'localhost'
+SETTINGS['database.port'] = 5432
+SETTINGS['database.user'] = 'zhaoru'
 def main():
     """Start VeighNa Trader"""
     app = QtWidgets.QApplication([])

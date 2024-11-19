@@ -30,7 +30,7 @@ def print_candleline(Bars: List[BarData]):
         'close': bar.close_price, 
         'volumn': bar.volume}, index=[0])
         df = pd.concat([df, new_df])
-
+    # https://plotly.com/python/candlestick-charts/
     fig = go.Figure(data=[go.Candlestick(x=df['date'],open=df['open'], close=df['close'], high=df['high'], low=df['low'])])	
     fig.show()
     return df
