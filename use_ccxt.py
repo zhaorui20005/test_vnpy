@@ -12,6 +12,8 @@ from vnpy.trader.utility import round_to, ZoneInfo
 from vnpy.trader.setting import SETTINGS
 from importlib import import_module
 from types import ModuleType
+import argparse
+import time
 
 SETTINGS['database.name'] = 'postgresql'
 SETTINGS['database.database'] = 'testdb'
@@ -21,21 +23,11 @@ SETTINGS['database.user'] = 'zhaoru'
 
 INTERVAL_ADJUSTMENT_MAP: dict[Interval, timedelta] = {
 	Interval.MINUTE: timedelta(minutes=1),
-    	Interval.HOUR: timedelta(hours=1),
-	Interval.DAILY: timedelta()         # 日线无需进行调整
+    Interval.HOUR: timedelta(hours=1),
+	Interval.DAILY: timedelta(days=1)         # 日线无需进行调整
 }
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
-LOADING_BAR_NUMBER_NUM = 200000
-def test_print_candleline():
-	bitfinex = ccxt.bitfinex()
-	starttimestamp = datetime.timestamp(datetime.strptime("20120101", "%Y%m%d")) * 1000
-	candleline = bitfinex.fetchOHLCV('BTCUSD', '1d', starttimestamp, 6000)
-	df = pd.DataFrame(candleline, columns=['timestamp', 'open', 'high', 'low', 'close', 'volumn'])
-	print("Start date is {}, end date is {}", datetime.fromtimestamp(df['timestamp'][0]/1000), datetime.fromtimestamp(df['timestamp'][len(df)-1]/1000))
-	df['date']  = (df.timestamp/1000).apply(datetime.fromtimestamp)
-	fig = go.Figure(data=[go.Candlestick(x=df['date'],open=df['open'], close=df['close'], high=df['high'], low=df['low'])])	
-	fig.show()
-	return df
+LOADING_BAR_NUMBER_NUM = 10000
 
 def download_bar_data(db, req):
 	symbol: str = req.symbol
@@ -44,7 +36,7 @@ def download_bar_data(db, req):
 	end: datetime = req.end
 	interval: Interval = req.interval
 	if not interval:
-        	interval = Interval.MINUTE
+		interval = Interval.MINUTE
 	end += timedelta(1)
 	start = datetime.timestamp(start)
 	end = datetime.timestamp(end)
@@ -56,18 +48,19 @@ def get_candle_bars_from_ccxt(symbol, interval, start, count):
 	candleline = bitfinex.fetchOHLCV(symbol, interval, start, count)
 	df = pd.DataFrame(candleline, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 	df['date']  = (df.timestamp/1000).apply(datetime.fromtimestamp)
-	print("length of df is {}".format(len(df)))
 	print(df)
-	# print(df[0])
-	# print(df[len(df)-1])
+	if len(df) > 0:
+		print(df.iloc[0])
+		print("...{} lines", len(df) - 2)
+		print(df.iloc[-1])
+	time.sleep(bitfinex.rateLimit / 1000)
 	return df
 
 def save_df_to_database(db, df, symbol, exchange, interval):
-	print(df)
 	data: list[BarData] = []
 	if df is not None:
 		# 填充NaN为0
-		#df.fillna(0, inplace=True)
+		df.fillna(0, inplace=True)
 		for row in df.itertuples():
 			bar: BarData = BarData(
         		symbol=symbol,
@@ -84,38 +77,79 @@ def save_df_to_database(db, df, symbol, exchange, interval):
         		gateway_name="ccxt"
         	)
 			data.append(bar)
-			print(bar.__dict__)
 	db.save_bar_data(data)
 
 
 def query_dataframe_and_save_to_database(db, start, end, interval, symbol, exchange):
-	total_bar = (end - start) / INTERVAL_ADJUSTMENT_MAP[interval].total_seconds()
+	step_in_seconds = INTERVAL_ADJUSTMENT_MAP[interval].total_seconds()
+	total_bars = (end - start) / step_in_seconds
 	starttimestamp = start * 1000
 	endtimestamp = end * 1000
-	df = get_candle_bars_from_ccxt(symbol, interval.value, starttimestamp, total_bar)
-	# save_df_to_database(db, df, symbol, exchange, interval)
-	#endtimestamp = endtimestamp + step
-	#each_bars = total_bar / LOADING_BAR_NUMBER_NUM
-	#start = starttimestamp
-	#for 
+	
+	bar_loaded = 0
+	while (starttimestamp < endtimestamp):
+		left_bars = total_bars - bar_loaded
+		current_bars = LOADING_BAR_NUMBER_NUM
+		if (left_bars < LOADING_BAR_NUMBER_NUM):
+			current_bars = left_bars
+		interval_str = interval.value
+		if interval == Interval.DAILY:
+			interval_str = "1d"
+		df = get_candle_bars_from_ccxt(symbol, interval_str, starttimestamp, current_bars)
+		if df is None or len(df) == 0:
+			break
+		starttimestamp += (step_in_seconds * current_bars * 1000)
+		enddftime = datetime.timestamp(df.iloc[-1]['date']) * 1000
+		# The start time maybe too early, we need to adjust it
+		if (enddftime > starttimestamp):
+			starttimestamp = enddftime
+		save_df_to_database(db, df, symbol, exchange, interval)
+		bar_loaded += current_bars
+	
+	print("Total loaded {} bars: interval {}".format(bar_loaded, interval_str))
 	
 if __name__ == '__main__':
-	# req = HistoryRequest(
-	# 	# 合约代码（示例cu888为米筐连续合约代码，仅用于示范，具体合约代码请根据需求查询数据服务提供商）
-	# 	# symbol="cu888",
-	# 	symbol = "BTC/USDT",
-	# 	# 合约所在交易所
-	# 	exchange = Exchange.LOCAL,
-	# 	# exchange=Exchange.SHFE,
-	# 	# 历史数据开始时间
-	# 	start=datetime(2024, 11, 1),
-	# 	# 历史数据结束时间
-	# 	end=datetime.now(),
-	# 	# 数据时间粒度，默认可选分钟级、小时级和日级，具体选择需要结合该数据服务的权限和需求自行选择
-	# 	interval=Interval.MINUTE
-	# )
+	timeformatstr = "%Y%m%d%H%M%S"
+	parser = argparse.ArgumentParser(description='Get interval bar data of symbols and load them into database.')
+	parser.add_argument('--symbol', help="The symbol of the bar data you want to load", default='BTC/USDT')
+	parser.add_argument('--interval', help='The interval of the bar data.(1d,1h,1m)', default='1m')
+	parser.add_argument('--starttime', help='Start datetime of your bar, format(YmdHMS)', default="20130101000000")
+	parser.add_argument('--endtime', help='End datetime of your bar, format(YmdHMS)')
+	args = parser.parse_args()
+	interval_data = Interval.MINUTE
+	if args.interval == '1D' or args.interval == '1d':
+		interval_data = Interval.DAILY
+	elif args.interval == '1h' or args.interval == '1H':
+		interval_data = Interval.HOUR
+	elif args.interval == '1M' or args.interval == '1m':
+		pass
+	else:
+		print('The input interval {} is not a valid one, valid values could be (1d,wh,1m)')
+		sys.exit()
+	start_timestamp = datetime.strptime(args.starttime, timeformatstr)
+	if args.endtime is None:
+		end_timestamp = datetime.now()
+	else:
+		end_timestamp = datetime.strptime(args.endtime, timeformatstr)
+	
+	req = HistoryRequest(
+		# 合约代码（示例cu888为米筐连续合约代码，仅用于示范，具体合约代码请根据需求查询数据服务提供商）
+		# symbol="cu888",
+		symbol = args.symbol,
+		# 合约所在交易所
+		exchange = Exchange.LOCAL,
+		# exchange=Exchange.SHFE,
+		# 历史数据开始时间
+		start=start_timestamp,
+		# 历史数据结束时间
+		end=end_timestamp,
+		# 数据时间粒度，默认可选分钟级、小时级和日级，具体选择需要结合该数据服务的权限和需求自行选择
+		interval=interval_data
+	)
 	db = get_database()
-	# download_bar_data(db, req)
+	download_bar_data(db, req)
+
+	
 	# Get sample data from bitfinex using ccxt and save to BTC_USDT_1m.csv
 	# start_time = datetime.timestamp(datetime(2021, 1, 1)) * 1000
 	# end_time = datetime.timestamp(datetime(2021, 12, 31)) * 1000
@@ -124,11 +158,11 @@ if __name__ == '__main__':
 	# print(df)
 
 	# load df from csv
-	df = pd.read_csv("BTC_USDT_1m.csv")
-	print(type(df.loc[0, 'date']))
-	df['date'] = pd.to_datetime(df['date'])
-	print(type(df.loc[0, 'date']))
-	save_df_to_database(db, df.iloc[:10], "BTC/USDT", Exchange.LOCAL, Interval.MINUTE)
+	# df = pd.read_csv("BTC_USDT_1m.csv")
+	# print(type(df.loc[0, 'date']))
+	# df['date'] = pd.to_datetime(df['date'])
+	# print(type(df.loc[0, 'date']))
+	# save_df_to_database(db, df.iloc[:10], "BTC/USDT", Exchange.LOCAL, Interval.MINUTE)
 
 
 
